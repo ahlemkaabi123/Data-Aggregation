@@ -72,19 +72,162 @@ def aggregator_spatial(df: pd.DataFrame, method: str = 'mean') -> pd.DataFrame:
     
     return agg
 
-def compress_data(data: pd.DataFrame) -> Tuple[bytes, int, int]:
+def compress_adaptive(data: pd.DataFrame, target_ratio: float = 5.0) -> Tuple[bytes, int, int, Dict[str, Any]]:
     """
-    Compresses the dataframe using zlib.
-    Returns: (compressed_bytes, original_size, compressed_size)
+    Compresses data adaptively based on content and target ratio.
+    Returns: (compressed_bytes, original_size, compressed_size, metadata)
     """
-    # Convert to JSON string first as a common payload format
-    json_str = data.to_json(orient='records')
-    original_bytes = json_str.encode('utf-8')
-    compressed_bytes = zlib.compress(original_bytes)
-    
-    return compressed_bytes, len(original_bytes), len(compressed_bytes)
+    if data.empty:
+        return b'', 0, 0, {}
 
-def calculate_metrics(original_df: pd.DataFrame, aggregated_df: pd.DataFrame, 
+    # Metadata to help reconstruction
+    metadata = {
+        'method': 'zlib',
+        'columns': list(data.columns),
+        'shape': data.shape,
+        'dtypes': data.dtypes.apply(lambda x: str(x)).to_dict()
+    }
+    
+    # 1. Analyze Data
+    # Check if temperature is suitable for differential encoding
+    # (slowly varying time series)
+    use_diff = False
+    if 'temperature' in data.columns and len(data) > 1:
+        temp_std = data['temperature'].std()
+        if temp_std < 2.0: # Low variance, good for diff
+            use_diff = True
+            
+    # 2. Prepare Payload
+    payload = data.copy()
+    
+    if use_diff:
+        # Differential encoding for temperature
+        # Store first value, then differences
+        first_temp = payload['temperature'].iloc[0]
+        payload['temperature'] = payload['temperature'].diff().fillna(first_temp)
+        metadata['encoding'] = 'differential'
+        metadata['first_temp'] = first_temp
+    else:
+        metadata['encoding'] = 'none'
+
+    # Convert to JSON
+    json_str = payload.to_json(orient='records')
+    original_bytes = json_str.encode('utf-8')
+    
+    # 3. Choose Compression Algorithm
+    # For humidity (often noisy or int-like), LZ77/Deflate (zlib) is usually good.
+    # For very repetitive data, RLE could be better, but zlib handles that well too.
+    # Here we simulate a choice.
+    
+    # If we needed higher compression at cost of CPU, we could use lzma (not implemented here for speed)
+    # For this simulation, we stick to zlib but with different levels
+    
+    if target_ratio > 10:
+        level = 9 # Max compression
+    elif target_ratio > 5:
+        level = 6 # Default
+    else:
+        level = 1 # Fast
+        
+    compressed_bytes = zlib.compress(original_bytes, level=level)
+    metadata['level'] = level
+    
+    return compressed_bytes, len(original_bytes), len(compressed_bytes), metadata
+
+def reconstruct_data(compressed_bytes: bytes, metadata: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Reconstructs the dataframe from compressed bytes and metadata.
+    """
+    if not compressed_bytes:
+        return pd.DataFrame()
+        
+    # Decompress
+    decompressed_bytes = zlib.decompress(compressed_bytes)
+    json_str = decompressed_bytes.decode('utf-8')
+    
+    df = pd.read_json(json_str)
+    
+    # Reverse Encoding
+    if metadata.get('encoding') == 'differential':
+        # Reconstruct cumulative sum
+        # The first value was stored as is (fillna), subsequent are diffs
+        # But cumsum works if the first value is the start.
+        # Our diff() made 2nd row = row2 - row1.
+        # So row2_orig = row2_diff + row1_orig.
+        # The first row is already the original value.
+        df['temperature'] = df['temperature'].cumsum()
+        
+    return df
+
+def calculate_real_mse(original_df: pd.DataFrame, reconstructed_df: pd.DataFrame) -> float:
+    """
+    Calculates the Mean Squared Error between original and reconstructed data.
+    Matches points by timestamp.
+    """
+    if original_df.empty or reconstructed_df.empty:
+        return 0.0
+        
+    # Merge on timestamp to align points
+    # Round timestamps to ensure matching if there were slight shifts (though there shouldn't be for lossless)
+    # If aggregation happened, reconstructed_df will have fewer points.
+    
+    # If we are comparing Aggregated Reconstructed vs Original Raw
+    # We need to map each original point to its nearest aggregated point
+    
+    # Let's assume we want to measure how well the aggregated data represents the original
+    
+    # Sort both
+    orig = original_df.sort_values('timestamp')
+    recon = reconstructed_df.sort_values('timestamp')
+    
+    # Ensure timestamp types match (convert to float if one is datetime)
+    if not pd.api.types.is_float_dtype(orig['timestamp']):
+        orig['timestamp'] = orig['timestamp'].astype(float)
+    if not pd.api.types.is_float_dtype(recon['timestamp']):
+        # If it's datetime, convert to timestamp float
+        if pd.api.types.is_datetime64_any_dtype(recon['timestamp']):
+             recon['timestamp'] = (recon['timestamp'].astype('int64') // 10**9).astype(float)
+        else:
+             recon['timestamp'] = recon['timestamp'].astype(float)
+
+    # Use merge_asof to find nearest aggregated point for each original point
+    merged = pd.merge_asof(orig, recon, on='timestamp', suffixes=('_orig', '_recon'), direction='nearest')
+    
+    # Calculate MSE for temperature
+    mse = ((merged['temperature_orig'] - merged['temperature_recon']) ** 2).mean()
+    
+    return mse
+
+def detect_anomalies(df: pd.DataFrame, threshold_z: float = 3.0) -> pd.DataFrame:
+    """
+    Detects anomalies using Z-score.
+    Returns a DataFrame of anomalous rows.
+    """
+    if df.empty:
+        return pd.DataFrame()
+        
+    anomalies = []
+    
+    # Simple Z-score per sensor
+    for sensor_id, group in df.groupby('sensor_id'):
+        if len(group) < 5:
+            continue
+            
+        mean = group['temperature'].mean()
+        std = group['temperature'].std()
+        
+        if std == 0:
+            continue
+            
+        z_scores = np.abs((group['temperature'] - mean) / std)
+        sensor_anomalies = group[z_scores > threshold_z]
+        anomalies.append(sensor_anomalies)
+        
+    if anomalies:
+        return pd.concat(anomalies)
+    return pd.DataFrame()
+
+def calculate_metrics(original_df: pd.DataFrame, reconstructed_df: pd.DataFrame, 
                      original_size: int, compressed_size: int) -> Dict[str, float]:
     """
     Calculates compression metrics and error.
@@ -99,15 +242,7 @@ def calculate_metrics(original_df: pd.DataFrame, aggregated_df: pd.DataFrame,
         metrics['compression_ratio'] = 1.0
         metrics['space_saving'] = 0.0
         
-    # MSE (Mean Squared Error) - tricky if aggregation reduced row count
-    # We compare the aggregated values to the original values they represent.
-    # For simplicity in this simulation, we can just compare the means if the shapes differ significantly,
-    # or we can try to map back.
-    # A simple approach: Compare the mean of the original dataset vs mean of aggregated dataset
-    
-    orig_mean_temp = original_df['temperature'].mean()
-    agg_mean_temp = aggregated_df['temperature'].mean()
-    
-    metrics['mse_temp'] = (orig_mean_temp - agg_mean_temp) ** 2
+    # Real MSE
+    metrics['mse_temp'] = calculate_real_mse(original_df, reconstructed_df)
     
     return metrics
