@@ -15,7 +15,7 @@ This project simulates a wireless sensor network to demonstrate data aggregation
 ## Installation
 
 1.  **Clone the repository** (if applicable) or navigate to the project directory.
-2. cd sensors_simulation
+2.  cd sensors_simulation
 3. **Create a virtual environment**:
     ```bash
     python3 -m venv venv
@@ -59,3 +59,9 @@ python test_simulation.py
 - **Pandas/Numpy**: Data manipulation and generation.
 - **Plotly**: Interactive charts.
 - **zlib**: Data compression.
+
+![Simulation Screenshot](images/img1.png)
+![Simulation Screenshot](images/img2.png)
+![Simulation Screenshot](images/img3.png)
+![Simulation Screenshot](images/img4.png)
+
