@@ -60,8 +60,8 @@ python test_simulation.py
 - **Plotly**: Interactive charts.
 - **zlib**: Data compression.
 
-![Simulation Screenshot](sensor_simulation/images/img1.png)
-![Simulation Screenshot](sensor_simulation/images/img2.png)
-![Simulation Screenshot](sensor_simulation/images/img3.png)
-![Simulation Screenshot](sensor_simulation/images/img4.png)
+![Simulation Screenshot](images/img1.png)
+![Simulation Screenshot](images/img2.png)
+![Simulation Screenshot](images/img3.png)
+![Simulation Screenshot](images/img4.png)
 
